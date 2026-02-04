@@ -674,11 +674,12 @@ async function showMySQLConfig() {
           background: #45a049;
         }
         .btn-cancel {
-          background: #f44336;
-          color: white;
+          background:#6c757d; 
+          color:white;
         }
         .btn-cancel:hover {
-          background: #da190b;
+          background:#6c757d; 
+          color:white;
         }
         .message {
           margin-top: 15px;
@@ -741,9 +742,8 @@ async function showMySQLConfig() {
           </div>
           
           <div class="button-group">
-            <button type="button" class="btn-test" onclick="testConnection()">🔍 Testar</button>
-            <button type="submit" class="btn-save">💾 Salvar</button>
-            <button type="button" class="btn-cancel" onclick="closeWindow()">❌ Cancelar</button>
+            <button type="button" class="btn-test" onclick="testConnection()"> Testar conexão</button>
+            <button type="submit" class="btn-save">Salvar</button>
           </div>
           
           <div id="message" class="message"></div>

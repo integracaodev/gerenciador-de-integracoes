@@ -59,7 +59,7 @@ async function createTableIfNotExists() {
       started_at DATETIME NULL,
       finished_at DATETIME NULL,
       last_log_file VARCHAR(500) NULL,
-      auto_restart_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      auto_restart_enabled BOOLEAN NOT NULL DEFAULT TRUE,
       auto_restart_interval INT NOT NULL DEFAULT 30 COMMENT 'Intervalo em segundos entre execuções',
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
