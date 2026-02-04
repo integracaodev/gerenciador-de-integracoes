@@ -185,7 +185,7 @@ A tabela `remote_commands` serve como uma fila/histórico de comandos.
 ### Exemplos
 
 ```sql
-//Iniciar um script/.bat
+--Iniciar um script/.bat
 USE api_monitor;
 
 INSERT INTO remote_commands (script_path, command, requested_by, target_server_id)
@@ -194,7 +194,7 @@ FROM project_status
 WHERE script_name='indexNome' AND project_name='integracao-nome'
 LIMIT 1;
 
-//Parar um script/.bat
+--Parar um script/.bat
 USE api_monitor;
 
 INSERT INTO remote_commands (script_path, command, requested_by, target_server_id)
