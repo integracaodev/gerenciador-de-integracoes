@@ -1,4 +1,4 @@
-USE gerenciador_de_bats;
+USE rochasystem_central;
 
 DROP TABLE IF EXISTS project_status;
 
