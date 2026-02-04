@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Central de apps</title>
+   <link rel="icon" type="image/x-icon" href="favicon.ico">
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+   <link rel="stylesheet" href="./node_modules/xterm/css/xterm.css" />
+   <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="sidebar">
+    <div id="header-container">
+      <h1 id="app-title">Central de Integrações</h1>
+    </div>
+    <div id="filters-section">
+      <h3 id="filters-title">
+        <span class="filter-icon">⚙</span> Filtros
+      </h3>
+      <div id="global-status">
+        <div class="global-badge global-badge-all active" id="global-all-badge" title="Mostrar todos">
+          <span class="global-badge-count" id="global-all-count">0</span>
+          <span class="global-badge-label">Todas</span>
+        </div>
+      <div class="global-badge global-badge-success" id="global-success-badge" title="Filtrar: Bat's rodando">
+        <span class="global-badge-count" id="global-success-count">0</span>
+        <span class="global-badge-label">Rodando</span>
+      </div>
+      <div class="global-badge global-badge-idle" id="global-idle-badge" title="Filtrar: Bat's paradas">
+        <span class="global-badge-count" id="global-idle-count">0</span>
+        <span class="global-badge-label">Paradas</span>
+      </div>
+      <div class="global-badge global-badge-error" id="global-error-badge" title="Filtrar: Bat's com erro">
+        <span class="global-badge-count" id="global-error-count">0</span>
+        <span class="global-badge-label">Erro</span>
+      </div>
+    </div>
+    </div>
+
+    <div id="projects"></div>
+    
+    <div id="sidebar-footer">
+      <img src="logo-white-blue.png" alt="Logo" />
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="tab-bar">
+      <button id="tab-left"  class="scroll-btn">◀</button>
+      <div  id="tabs-wrapper">
+        <div id="tabs"></div>
+      </div>
+      <button id="tab-right" class="scroll-btn">▶</button>      
+    </div>
+    <div id="terminal-container"></div>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>

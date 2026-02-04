@@ -1,0 +1,44 @@
+{
+  "name": "rochasystem-central-de-apps",
+  "version": "1.0.0",
+  "description": "Gerenciador centralizado de scripts e integrações",
+  "author": "RochaSystem",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder -w",
+    "icon": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& 'C:\\\\Program Files\\\\nodejs\\\\node.exe' 'scripts\\\\make-icon.js'\"",
+    "pack": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& 'C:\\\\Program Files\\\\nodejs\\\\node.exe' 'scripts\\\\make-icon.js'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & 'C:\\\\Program Files\\\\nodejs\\\\node.exe' 'node_modules\\\\electron-packager\\\\bin\\\\electron-packager.js' . 'RochaSystem - Central de Apps' --platform=win32 --arch=x64 --out=dist --overwrite --icon=favicon.ico; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $exe = 'dist\\\\RochaSystem - Central de Apps-win32-x64\\\\RochaSystem - Central de Apps.exe'; if (-not (Test-Path $exe)) { Write-Error ('EXE não encontrado: ' + $exe); exit 1 }; & 'node_modules\\\\rcedit\\\\bin\\\\rcedit-x64.exe' $exe --set-icon 'app-icon.ico'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\"",
+    "clean": "rmdir /s /q dist"
+  },
+  "build": {
+    "appId": "rochasystem.centraldeapps",
+    "productName": "RochaSystem - Central de Apps",
+    "asar": false,
+    "npmRebuild": false,
+    "buildDependenciesFromSource": false,
+    "files": [
+      "**/*",
+      "!dist",
+      "!.git",
+      "!.docker"
+    ],
+    "win": {
+      "target": "dir"
+    }
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "mysql2": "^3.11.5",
+    "tree-kill": "^1.2.2",
+    "xterm": "^5.3.0"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.1",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.7.0",
+    "electron-packager": "^17.1.2",
+    "sharp": "^0.34.5",
+    "to-ico": "^1.1.5"
+  }
+}
