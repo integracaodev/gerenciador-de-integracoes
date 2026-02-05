@@ -6,7 +6,7 @@
   <a href="https://rochasystem.com.br/">
     <img src="https://rochasystem.com.br/wp-content/uploads/2024/09/logo5.3.png" alt="RochaSystem" width="140">
   </a>
-  <h3 align="center">RochaSystem - Central de Apps</h3>
+  <h3 align="center">Central de Apps</h3>
 
   <p align="center">
     Gerenciador centralizado de scripts e integrações
