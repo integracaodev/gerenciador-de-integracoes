@@ -34,7 +34,7 @@ jobs:
         run: |
           if (!(Test-Path "dist")) { throw "Pasta dist/ não encontrada." }
 
-          $tag = "${{ github.ref_name }}"
+          $tag = "release-${{ github.ref_name }}"
           if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "manual-${{ github.run_number }}" }
 
           $zipName = "RochaSystem-Central-de-Apps-$tag-win32-x64.zip"
