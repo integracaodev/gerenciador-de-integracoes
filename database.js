@@ -281,6 +281,8 @@ async function closeDatabase() {
       console.log('[MySQL] Conexão fechada');
     } catch (error) {
       console.error('[MySQL] Erro ao fechar conexão:', error.message);
+    } finally {
+      pool = null;
     }
   }
 }

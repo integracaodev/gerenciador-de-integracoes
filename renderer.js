@@ -32,7 +32,7 @@ async function loadProjects() {
     title.textContent = '🗀 '+ projName;
     header.appendChild(title);
 
-    const allRunning  = bats.every(b => b.running);
+    const allRunning = bats.every(b => (b?.dbStatus?.status ? b.dbStatus.status === 'running' : !!b.running));
 
     const playBtn = document.createElement('button');
     playBtn.textContent = allRunning ? '⏹' : '▶';
@@ -85,8 +85,29 @@ async function loadProjects() {
         e.stopPropagation();
         openScheduleModal(b.path, b.name);
       };
+
+      // Botão de start/stop (toggle) baseado no status do BANCO (dbStatus),
+      // pois em multi-servidor/auto-restart o procMap local pode não refletir o estado desejado.
+      // - dbStatus.status === 'running' => ⏹
+      // - caso contrário => ▶
+      const isRunning = (b?.dbStatus?.status ? b.dbStatus.status === 'running' : !!b.running);
+      const startStopBtn = document.createElement('button');
+      startStopBtn.className = 'stop-btn';
+      startStopBtn.innerHTML = isRunning ? '⏹' : '▶';
+      startStopBtn.title = isRunning ? 'Parar script' : 'Iniciar script';
+      startStopBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (isRunning) {
+          // Mesmo comportamento do "X" da tab: fecha UI se existir e para o processo
+          removeTabUI(b.path);
+          ipcRenderer.send('stop-bat', b.path);
+          return;
+        }
+        ipcRenderer.send('run-bat', b.path);
+      };
       
       container.appendChild(link);
+      container.appendChild(startStopBtn);
       container.appendChild(scheduleBtn);
 
       list.appendChild(container);

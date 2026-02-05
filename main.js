@@ -32,6 +32,38 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+let dbReinitPromise = null;
+async function reinitDatabaseSafe() {
+  if (dbReinitPromise) return dbReinitPromise;
+  dbReinitPromise = (async () => {
+    try {
+      try { await closeDatabase(); } catch {}
+      await initDatabase();
+      console.log('[MySQL] Reconexão OK');
+      return true;
+    } catch (e) {
+      console.error('[MySQL] Falha ao reconectar:', e?.message || e);
+      return false;
+    } finally {
+      dbReinitPromise = null;
+    }
+  })();
+  return dbReinitPromise;
+}
+
+async function saveStatusWithRetry(scriptPath, projectName, scriptName, status, exitCode = null, logFile = null, pid = undefined) {
+  const serverId = getCurrentServerId();
+  const attempts = 3;
+  for (let i = 1; i <= attempts; i++) {
+    const ok = await saveProjectStatus(scriptPath, projectName, scriptName, status, exitCode, logFile, pid, serverId);
+    if (ok) return true;
+    console.warn(`[MySQL] saveProjectStatus falhou (tentativa ${i}/${attempts})`, { scriptName, status });
+    await reinitDatabaseSafe();
+    await delay(250 * i);
+  }
+  return false;
+}
+
 function treeKillAsync(pid) {
   return new Promise((resolve) => {
     if (!pid) return resolve(new Error('PID inválido'));
@@ -98,11 +130,6 @@ async function stopScriptLikeTabClose(scriptPath, {
     console.log(`[Stop] Timer de auto-restart cancelado: ${scriptPath}`);
   }
 
-  // Mimic UI X: close tab UI first (optional)
-  if (closeTabUi && mainWindow) {
-    mainWindow.webContents.send('close-tab', scriptPath);
-  }
-
   // Extrair informações do projeto
   const pathSegments = scriptPath.split(path.sep);
   const projectName = pathSegments[pathSegments.length - 3] || 'Unknown';
@@ -132,7 +159,10 @@ async function stopScriptLikeTabClose(scriptPath, {
         if (isPidAlive(dbPid)) {
           return { ok: false, reason: 'pid_still_alive', pid: dbPid };
         }
-        await saveProjectStatus(scriptPath, projectName, scriptName, 'stopped', null, null, null, currentServerId);
+        const saved = await saveStatusWithRetry(scriptPath, projectName, scriptName, 'stopped', null, null, null);
+        if (!saved) {
+          return { ok: false, reason: 'db_write_failed', method: 'pid', pid: dbPid };
+        }
         return { ok: true, method: 'pid', pid: dbPid };
       }
     }
@@ -141,12 +171,20 @@ async function stopScriptLikeTabClose(scriptPath, {
     // - UI close: pode atualizar status por intenção
     // - multi-server: NÃO deve consumir o comando se outro servidor pode executar
     if (updateDbWhenNoLocalProcess) {
-      await saveProjectStatus(scriptPath, projectName, scriptName, 'stopped', null, null, null, getCurrentServerId());
+      const saved = await saveStatusWithRetry(scriptPath, projectName, scriptName, 'stopped', null, null, null);
+      if (!saved) {
+        return { ok: false, reason: 'db_write_failed', method: 'intent' };
+      }
     }
     return { ok: false, reason: 'no_local_process' };
   }
 
   const { process: child, logStream } = entry;
+
+  // Mimic UI X: fechar tab antes de matar (somente quando existe processo local)
+  if (closeTabUi && mainWindow) {
+    mainWindow.webContents.send('close-tab', scriptPath);
+  }
 
   // Marcar como manualmente parado para não disparar auto-restart no exit handler
   try { procMap[scriptPath].manuallyStopped = true; } catch {}
@@ -158,11 +196,18 @@ async function stopScriptLikeTabClose(scriptPath, {
   const result = await killAndWaitForExit(child, { gracefulMs: 800, forceMs: 12000 });
   if (!result.ok) {
     // Não mentir no banco se não conseguiu parar
-    await saveProjectStatus(scriptPath, projectName, scriptName, 'running', null, null, child?.pid ?? undefined, getCurrentServerId());
+    const savedRunning = await saveStatusWithRetry(scriptPath, projectName, scriptName, 'running', null, null, child?.pid ?? undefined);
+    if (!savedRunning) {
+      return { ok: false, reason: 'db_write_failed', method: 'procMap', pid: result.pid ?? child?.pid };
+    }
     return { ok: false, reason: 'kill_timeout', pid: result.pid ?? child?.pid };
   }
 
-  await saveProjectStatus(scriptPath, projectName, scriptName, 'stopped', null, null, null, getCurrentServerId());
+  const savedStopped = await saveStatusWithRetry(scriptPath, projectName, scriptName, 'stopped', null, null, null);
+  if (!savedStopped) {
+    // Processo parou, mas não conseguimos refletir no banco
+    return { ok: false, reason: 'db_write_failed', method: 'procMap', pid: result.pid, killed: true };
+  }
   return { ok: true, method: 'procMap', pid: result.pid };
 }
 
@@ -213,10 +258,10 @@ async function syncWithDatabase() {
           const result = await killAndWaitForExit(child, { gracefulMs: 800, forceMs: 12000 });
           if (!result.ok) {
             console.error(`[Sync] Falha ao parar (pid=${result.pid ?? child?.pid ?? '??'}). Mantendo status como running para não mentir no banco.`);
-            await saveProjectStatus(scriptPath, dbStatus.project_name, dbStatus.script_name, 'running', null, null, child?.pid ?? undefined, getCurrentServerId());
+            await saveStatusWithRetry(scriptPath, dbStatus.project_name, dbStatus.script_name, 'running', null, null, child?.pid ?? undefined);
           } else {
             // Garantir stopped no banco (já deveria estar), mas atualiza timestamps
-            await saveProjectStatus(scriptPath, dbStatus.project_name, dbStatus.script_name, 'stopped', null, null, null, getCurrentServerId());
+            await saveStatusWithRetry(scriptPath, dbStatus.project_name, dbStatus.script_name, 'stopped', null, null, null);
           }
           
           stoppedCount++;
@@ -241,16 +286,7 @@ async function syncWithDatabase() {
         const projectName = pathSegments[pathSegments.length - 3] || 'Unknown';
         const scriptName = path.basename(dbStatus.script_path, path.extname(dbStatus.script_path));
         
-        await saveProjectStatus(
-          dbStatus.script_path,
-          projectName,
-          scriptName,
-          'stopped',
-          null,
-          null,
-          null,
-          currentServerId
-        );
+        await saveStatusWithRetry(dbStatus.script_path, projectName, scriptName, 'stopped', null, null, null);
         
         updatedCount++;
       }
@@ -363,6 +399,14 @@ async function executeRemoteStartCommand(cmd) {
   // Verificar se o script já está rodando
   if (procMap[scriptPath]) {
     console.log(`[RemoteCmd] Script já está rodando: ${scriptPath}`);
+    // Garantir que o banco reflita running (pode ter ficado stopped por falha anterior)
+    try {
+      const pathSegments = scriptPath.split(path.sep);
+      const projectName = pathSegments[pathSegments.length - 3] || 'Unknown';
+      const scriptName = path.basename(scriptPath, path.extname(scriptPath));
+      const pid = procMap[scriptPath]?.process?.pid;
+      await saveStatusWithRetry(scriptPath, projectName, scriptName, 'running', null, null, pid ?? undefined);
+    } catch {}
     await markRemoteCommandAsExecuted(cmd.id);
     return;
   }
@@ -390,7 +434,10 @@ async function executeRemoteStartCommand(cmd) {
   };
   
   // Iniciar o script usando a função existente
-  await runScript(fakeEvent, scriptPath);
+  const started = await runScript(fakeEvent, scriptPath);
+  if (!started) {
+    throw new Error(`Falha ao iniciar script (status não persistido no banco): ${scriptPath}`);
+  }
   
   // Marcar como executado
   await markRemoteCommandAsExecuted(cmd.id);
@@ -416,24 +463,89 @@ async function executeRemoteStopCommand(cmd) {
     return;
   }
   
-  // Faz exatamente o mesmo que "fechar tab": fecha UI (se existir) e para o processo com a mesma lógica do stop-bat
+  // Para script usando a MESMA lógica do stop-bat (stopScriptLikeTabClose)
   const stopResult = await stopScriptLikeTabClose(scriptPath, {
     reason: 'REMOTE_STOP',
-    closeTabUi: true,
+    // Multi-servidor: não feche UI se este servidor não executar o comando
+    closeTabUi: false,
     allowPidFallback: true,
     // Se não houver processo local, NÃO atualiza DB e NÃO consome comando (outro servidor pode executar)
     updateDbWhenNoLocalProcess: false,
   });
 
+  // Se matou/parou, mas não conseguiu gravar no banco, NÃO consome o comando (deixa pending para retry)
+  if (!stopResult.ok && stopResult.reason === 'db_write_failed') {
+    console.warn(`[RemoteCmd] Stop: processo/parada OK, mas falhou gravar status no DB. Mantendo pending para retry. script=${scriptPath}`);
+    // Ainda assim, se o processo de fato foi encerrado, podemos fechar a tab para refletir o estado real,
+    // e deixar o comando pending para re-tentar persistir no banco na próxima rodada.
+    if (mainWindow && (stopResult.killed || stopResult.method === 'pid' || stopResult.method === 'procMap')) {
+      mainWindow.webContents.send('close-tab', scriptPath);
+      mainWindow.webContents.send('refresh-projects');
+    }
+    return;
+  }
+
   // Se não temos processo local e não era direcionado, deixa pending para outro servidor
   if (!stopResult.ok && stopResult.reason === 'no_local_process' && !targetServerId) {
-    console.log(`[RemoteCmd] Stop: sem processo local neste servidor (${currentServerId}). Mantendo comando pending: ${scriptPath}`);
+    // Se o status no DB pertence a ESTE servidor, tratamos como stop idempotente (garantir stopped + consumir)
+    let dbRow = null;
+    try {
+      dbRow = await getProjectStatus(scriptPath);
+    } catch (e) {
+      console.warn(`[RemoteCmd] Stop: falha ao ler project_status (mantendo pending). script=${scriptPath} err=${e?.message || e}`);
+      return;
+    }
+    const dbServer = dbRow?.server_id;
+
+    if (dbServer && dbServer !== currentServerId) {
+      console.log(`[RemoteCmd] Stop: sem processo local e script é de outro servidor (db.server_id=${dbServer}). Mantendo pending: ${scriptPath}`);
+      return;
+    }
+
+    if (dbServer === currentServerId) {
+      const pathSegments = scriptPath.split(path.sep);
+      const projectName = pathSegments[pathSegments.length - 3] || 'Unknown';
+      const scriptName = path.basename(scriptPath, path.extname(scriptPath));
+      const saved = await saveStatusWithRetry(scriptPath, projectName, scriptName, 'stopped', null, null, null);
+      if (!saved) {
+        console.warn(`[RemoteCmd] Stop idempotente (server_id=this): falha ao gravar stopped. Mantendo pending: ${scriptPath}`);
+        return;
+      }
+      console.log(`[RemoteCmd] Stop idempotente (server_id=this): atualizado para stopped. Marcando executado: ${scriptPath}`);
+      await markRemoteCommandAsExecuted(cmd.id);
+      if (mainWindow) {
+        mainWindow.webContents.send('close-tab', scriptPath);
+        mainWindow.webContents.send('refresh-projects');
+      }
+      return;
+    }
+
+    console.log(`[RemoteCmd] Stop: sem processo local neste servidor (${currentServerId}) e sem server_id confiável. Mantendo pending: ${scriptPath}`);
     return;
   }
 
   // Se o script pertence a outro servidor (segundo project_status) e não era direcionado, deixa pending
   if (!stopResult.ok && stopResult.reason === 'different_server' && !targetServerId) {
     console.log(`[RemoteCmd] Stop: script de outro servidor. Mantendo comando pending: ${scriptPath}`);
+    return;
+  }
+
+  // Se o comando é direcionado para ESTE servidor e não há processo local, trate como stop idempotente (sucesso)
+  if (!stopResult.ok && stopResult.reason === 'no_local_process' && targetServerId === currentServerId) {
+    const pathSegments = scriptPath.split(path.sep);
+    const projectName = pathSegments[pathSegments.length - 3] || 'Unknown';
+    const scriptName = path.basename(scriptPath, path.extname(scriptPath));
+    const saved = await saveStatusWithRetry(scriptPath, projectName, scriptName, 'stopped', null, null, null);
+    if (!saved) {
+      console.warn(`[RemoteCmd] Stop direcionado (idempotente): falha ao gravar stopped. Mantendo pending: ${scriptPath}`);
+      return;
+    }
+    console.log(`[RemoteCmd] Stop direcionado: sem processo local (idempotente). Atualizado para stopped e marcando executado: ${scriptPath}`);
+    await markRemoteCommandAsExecuted(cmd.id);
+    if (mainWindow) {
+      mainWindow.webContents.send('close-tab', scriptPath);
+      mainWindow.webContents.send('refresh-projects');
+    }
     return;
   }
 
@@ -444,7 +556,11 @@ async function executeRemoteStopCommand(cmd) {
   }
 
   await markRemoteCommandAsExecuted(cmd.id);
-  if (mainWindow) mainWindow.webContents.send('refresh-projects');
+  if (mainWindow) {
+    // Mimic UI X: fecha tab quando o stop realmente foi executado aqui
+    mainWindow.webContents.send('close-tab', scriptPath);
+    mainWindow.webContents.send('refresh-projects');
+  }
 }
 
 /**
@@ -942,14 +1058,7 @@ async function syncOrphanProcessesOnStartup() {
         console.log(`[Startup] Processo órfão detectado: ${status.script_name}`);
         
         // Atualizar para 'stopped' pois a aplicação não tem controle sobre ele
-        await saveProjectStatus(
-          status.script_path,
-          status.project_name,
-          status.script_name,
-          'stopped',
-          null,
-          currentServerId
-        );
+        await saveStatusWithRetry(status.script_path, status.project_name, status.script_name, 'stopped', null, null, null);
         
         orphanCount++;
       }
@@ -1037,9 +1146,9 @@ async function stopAllRunningScripts() {
     if (!result.ok) {
       console.error(`[Shutdown] Falha ao parar ${scriptName} (pid=${result.pid ?? child?.pid ?? '??'}). Processo pode permanecer órfão.`);
       // Não marcar stopped para não mentir (processo pode continuar vivo)
-      await saveProjectStatus(scriptPath, projectName, scriptName, 'running', null, null, child?.pid ?? undefined, getCurrentServerId());
+      await saveStatusWithRetry(scriptPath, projectName, scriptName, 'running', null, null, child?.pid ?? undefined);
     } else {
-      await saveProjectStatus(scriptPath, projectName, scriptName, 'stopped', null, null, null, getCurrentServerId());
+      await saveStatusWithRetry(scriptPath, projectName, scriptName, 'stopped', null, null, null);
     }
   }
   
@@ -1180,7 +1289,7 @@ function writeBoth(evt, fullPath, logStream, chunk) {
 async function runScript(evt, fullPath) {
   if (procMap[fullPath]) {
     evt.reply('focus-tab', fullPath);
-    return;
+    return true;
   }
   
   // Extract project and script names
@@ -1208,7 +1317,7 @@ async function runScript(evt, fullPath) {
     if (!phpPath) {
       writeBoth(evt, fullPath, logStream, "[ERRO] Caminho do PHP não definido.\n");
       try { logStream.end(); } catch {}
-      return;
+      return false;
     }
   }
 
@@ -1223,8 +1332,16 @@ async function runScript(evt, fullPath) {
 
   procMap[fullPath] = { process: child, logStream, exitCode: null, manuallyStopped: false };
   
-  // Save to database (await to ensure it's saved)
-  await saveProjectStatus(fullPath, projectName, scriptName, 'running', null, logFile, child.pid, getCurrentServerId());
+  // Save to database (retries). If it fails, cancel execution to keep consistency.
+  const saved = await saveStatusWithRetry(fullPath, projectName, scriptName, 'running', null, logFile, child.pid);
+  if (!saved) {
+    const msg = "[ERRO] Não foi possível salvar status 'running' no banco. Execução cancelada para manter consistência.\n";
+    writeBoth(evt, fullPath, logStream, msg);
+    try { child.kill(); } catch {}
+    try { logStream.end(); } catch {}
+    delete procMap[fullPath];
+    return false;
+  }
   
   evt.reply('bat-started', fullPath);
 
@@ -1256,7 +1373,7 @@ async function runScript(evt, fullPath) {
           // Keep status as 'running' for scheduled scripts (even during interval)
           // Only update exit_code to track if last execution had errors
           // Durante o intervalo (sem processo), limpamos PID para evitar PID reciclado matar processo errado
-          await saveProjectStatus(fullPath, projectName, scriptName, 'running', code, logFile, null, getCurrentServerId());
+          await saveStatusWithRetry(fullPath, projectName, scriptName, 'running', code, logFile, null);
           
           // Schedule next execution
           scheduleTimers[fullPath] = setTimeout(() => {
@@ -1267,13 +1384,13 @@ async function runScript(evt, fullPath) {
         } else {
           // No schedule - save final status (finished or error)
           const status = (code === 0) ? 'finished' : 'error';
-          await saveProjectStatus(fullPath, projectName, scriptName, status, code, logFile, undefined, getCurrentServerId());
+          await saveStatusWithRetry(fullPath, projectName, scriptName, status, code, logFile, undefined);
         }
       } catch (error) {
         console.error('[Schedule] Erro ao verificar schedule:', error.message);
         // If error checking schedule, save status anyway
         const status = (code === 0) ? 'finished' : 'error';
-        await saveProjectStatus(fullPath, projectName, scriptName, status, code, logFile, undefined, getCurrentServerId());
+        await saveStatusWithRetry(fullPath, projectName, scriptName, status, code, logFile, undefined);
       }
     }
     
@@ -1285,6 +1402,8 @@ async function runScript(evt, fullPath) {
     const msg = `[ERRO spawn] ${err?.message || err}\n`;
     writeBoth(evt, fullPath, logStream, msg);
   });
+
+  return true;
 }
 
 /* ===================== IPC Execução ===================== */
@@ -1293,18 +1412,65 @@ ipcMain.on('run-bat', (evt, fullPath) => runScript(evt, fullPath));
 ipcMain.on('run-all', async (evt, projectName) => {
   const root = resolveScriptsRoot();
   if (!root) return;
-  const publicDir = path.join(root, projectName, 'public');
-  if (!fs.existsSync(publicDir) || !fs.statSync(publicDir).isDirectory()) return;
-  const files = walkPhpFiles(publicDir, [], publicDir).map(o => o.full);
+  const projDir   = path.join(root, projectName);
+  const publicDir = path.join(projDir, 'public');
+  const batsDir   = path.join(projDir, 'bats');
+
+  let found = [];
+  if (fs.existsSync(publicDir) && fs.statSync(publicDir).isDirectory()) {
+    found = found.concat(walkPhpFiles(publicDir, [], publicDir));
+  }
+  if (fs.existsSync(batsDir) && fs.statSync(batsDir).isDirectory()) {
+    found = found.concat(walkPhpFiles(batsDir, [], batsDir));
+  }
+
+  const files = found.map(o => o.full);
+  if (!files.length) return;
+
+  // Mesmo método do clique individual: "run-bat" -> runScript -> grava running -> abre tab
   files.forEach(f => ipcMain.emit('run-bat', evt, f));
 });
 
-ipcMain.on('stop-all', (evt, projectName) => {
+ipcMain.on('stop-all', async (_evt, projectName) => {
   const root = resolveScriptsRoot();
   if (!root) return;
-  const publicDir = path.join(root, projectName, 'public');
-  const toStop = Object.keys(procMap).filter(p => p.startsWith(publicDir + path.sep));
-  toStop.forEach(p => ipcMain.emit('stop-bat', evt, p));
+
+  const projDir = path.join(root, projectName);
+  const prefix = projDir + path.sep;
+
+  // Parar processos rodando + timers de auto-restart (scripts em intervalo)
+  const candidates = new Set([
+    ...Object.keys(procMap),
+    ...Object.keys(scheduleTimers),
+  ]);
+
+  const toStop = [...candidates].filter(p => p.startsWith(prefix));
+  if (toStop.length === 0) {
+    console.log('[stop-all] Nenhum script para parar em:', projectName);
+    return;
+  }
+
+  console.log(`[stop-all] Parando ${toStop.length} script(s) do projeto: ${projectName}`);
+
+  for (const p of toStop) {
+    try {
+      // Mesmo método do "X" da tab: fecha UI primeiro, depois para
+      if (mainWindow) {
+        mainWindow.webContents.send('close-tab', p);
+      }
+      await stopScriptLikeTabClose(p, {
+        reason: 'UI_STOP_ALL',
+        closeTabUi: false,
+        allowPidFallback: false,
+        // UI stop-all é uma intenção local: pode atualizar stopped mesmo se não houver procMap
+        updateDbWhenNoLocalProcess: true,
+      });
+    } catch (e) {
+      console.error('[stop-all] Erro ao parar:', p, e?.message || e);
+    }
+  }
+
+  if (mainWindow) mainWindow.webContents.send('refresh-projects');
 });
 
 ipcMain.on('stop-bat', async (_, fullPath) => {
@@ -1316,6 +1482,12 @@ ipcMain.on('stop-bat', async (_, fullPath) => {
     closeTabUi: false, // a UI já remove a tab antes de chamar stop-bat
     allowPidFallback: false,
   });
+
+  // A UI recarrega a lista imediatamente (antes do processo morrer). Envie refresh ao final
+  // para atualizar ícones (⏹/▶) conforme o estado real após parar.
+  if (mainWindow) {
+    mainWindow.webContents.send('refresh-projects');
+  }
 });
 
 // MySQL configuration endpoints
