@@ -228,14 +228,7 @@ Ao digitar caminhos manualmente no SQL, use `\\` (barra dupla):
 
 ### Geração de Build
 
-```sh
-# Gerar executável Windows
-npm run dist
-
-# Executável gerado em:
-dist/win-unpacked/RochaSystem - Central de Apps.exe
-```
-
+Para gerar um build localmente, é necessário rodar o comando `npm run pack`. Dessa maneira, pasta `dist/RochaSystem - Central de Apps-win32-x64` será criada. Toda a pasta precisa ser copiada para o local onde será executada para que o arquivo *.exe* funcione. Também é possível gerar um build através deste repositório, na sessão *Actions*. Se desejar mais detalhes sobre a implantação do sistema, vide o arquivo *Manual - Gerenciador de Integrações*, neste mesmo repositório.
 <br/>
 
 ## Logs
