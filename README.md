@@ -226,9 +226,40 @@ Ao digitar caminhos manualmente no SQL, use `\\` (barra dupla):
 
 
 
-### Geração de Build
+### Instalação
 
-Para gerar um build localmente, é necessário rodar o comando `npm run pack`. Dessa maneira, pasta `dist/RochaSystem - Central de Apps-win32-x64` será criada. Toda a pasta precisa ser copiada para o local onde será executada para que o arquivo *.exe* funcione. Também é possível gerar um build através deste repositório, na sessão *Actions*. Se desejar mais detalhes sobre a implantação do sistema, vide o arquivo *Manual - Gerenciador de Integrações*, neste mesmo repositório.
+**1.** Faça o build da aplicação ou baixe a versão mais recente do sistema no GitHub.
+- Para gerar o build localmente, execute o comando `npm run pack`.
+- Vá no [repositório da aplicação no GitHub](https://github.com/integracaodev/gerenciador-de-integracoes), acesse o menu [releases](https://github.com/integracaodev/gerenciador-de-integracoes/releases) e baixe o *.zip* mais recente.
+
+**2.** Copie o conteúdo para o servidor. 
+- Se tiver feito o build local, é necessário copiar **toda a pasta** `RochaSystem - Central de Apps-win32-x64`, que se encontra dentro da pasta *dist*, para que o executável funcione.
+- Se baixou a versão direto do GitHub, extraia o conteúdo do *.zip* no servidor desejado.
+
+**3.** Dê um duplo click no arquivo *.exe*.
+**4.** Faça as configurações necessárias através do menu superior:
+   - **Configurações > Configurar Servidor**: Adicione o IP do servidor atual
+   - **Configurações > Configurar PHP**: Navegue e selecione a pasta que contém o executável do PHP
+   - **Configurações > Configurar MySQL**: Adicione os dados de conexão com o banco.
+     - No momento, o banco de dados da aplicação está no servidor *192.168.1.29*. O banco é o *api_monitor*, usuário *root* e senha *Broot123*.
+   - **Configurações > Configurar Pasta RAIZ**: Navegue e selecione a pasta das integrações, elas aparecerão automaticamente na interface do sistema.
+     - A pasta deve estar nessa estrutura:
+    <br/>
+        ```
+        PASTA_RAIZ/
+        ├── Projeto1/
+        │   ├── public/          # Scripts PHP aqui
+        │   │   └── script.php
+        │   └── bats/           # Scripts .bat aqui
+        │       └── script.bat
+        ├── Projeto2/
+        │   ├── public/
+        │   └── bats/
+        └── Projeto3/
+            └── bats/
+        ```
+
+
 <br/>
 
 ## Logs
