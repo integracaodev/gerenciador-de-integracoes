@@ -198,7 +198,7 @@ LIMIT 1;
 USE api_monitor;
 
 INSERT INTO remote_commands (script_path, command, requested_by, target_server_id)
-SELECT script_path, 'start', 'usuarioatual', server_id
+SELECT script_path, 'stop', 'usuarioatual', server_id
 FROM project_status
 WHERE script_name='indexNome' AND project_name='integracao-nome'
 LIMIT 1;
