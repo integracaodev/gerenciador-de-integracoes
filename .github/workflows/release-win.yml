@@ -1,0 +1,55 @@
+name: Build (Windows) + Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*" # ex: v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  build-win:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (npm run pack)
+        run: npm run pack
+
+      - name: Zip dist folder
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist")) { throw "Pasta dist/ não encontrada." }
+
+          $tag = "${{ github.ref_name }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "manual-${{ github.run_number }}" }
+
+          $zipName = "RochaSystem-Central-de-Apps-$tag-win32-x64.zip"
+
+          if (Test-Path $zipName) { Remove-Item $zipName -Force }
+          Compress-Archive -Path "dist\*" -DestinationPath $zipName -Force
+
+          "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TAG_NAME=$tag"     | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Create/Update GitHub Release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ env.TAG_NAME }}
+          draft: false
+          prerelease: false
+          files: ${{ env.ZIP_NAME }}
