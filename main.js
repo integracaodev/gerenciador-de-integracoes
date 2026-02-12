@@ -1185,6 +1185,35 @@ app.on('before-quit', async (event) => {
 });
 
 /* ===================== Helpers ===================== */
+
+// indexSascarA -> "Index Sascar A"
+// index_sascar_a -> "Index Sascar A"
+// index-sascar-a -> "Index Sascar A"
+function toFriendlyTitle(raw) {
+  if (!raw) return raw;
+
+  // Normaliza separadores comuns
+  let s = String(raw).replace(/[_-]+/g, ' ').trim();
+
+  // Separa camelCase/PascalCase: "indexSascarA" -> "index Sascar A"
+  s = s.replace(/(?<!^)([A-Z])/g, ' $1');
+
+  // Colapsa espaços
+  s = s.replace(/\s+/g, ' ').trim();
+
+  // Capitaliza, preservando siglas já em maiúsculo (ex.: API, GPS)
+  return s
+    .split(' ')
+    .map(w => {
+      if (!w) return w;
+      // Mantém siglas (2+ letras todas maiúsculas) e números
+      if (/^[A-Z0-9]{2,}$/.test(w)) return w;
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
+
 function friendlyTitleForPhp(fullPath, defaultTitle) {
   let title = defaultTitle;
   try {
@@ -1198,7 +1227,7 @@ function friendlyTitleForPhp(fullPath, defaultTitle) {
   if (title === defaultTitle) {
     title = path.basename(fullPath, path.extname(fullPath));
   }
-  return title;
+  return toFriendlyTitle(title);
 }
 
 function walkPhpFiles(dir, acc, baseDir) {
