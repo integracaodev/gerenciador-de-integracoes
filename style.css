@@ -175,7 +175,7 @@ body {
 
 /* Tab status indicator (colored circle) */
 .tab-status-indicator {
-  display: inline-block;
+  display: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
