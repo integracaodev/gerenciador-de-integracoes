@@ -1311,8 +1311,13 @@ ipcMain.handle('list-bats', async () => { // mantemos o canal por compatibilidad
 /* ===================== Execução e Logs ===================== */
 function writeBoth(evt, fullPath, logStream, chunk) {
   const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-  try { logStream.write(text); } catch {}
-  evt.reply('terminal-output', { batPath: fullPath, data: text });
+  // Evita ERR_STREAM_WRITE_AFTER_END: stdout/stderr podem emitir dados após exit → logStream já foi end()
+  if (logStream && logStream.writable) {
+    try { logStream.write(text); } catch (_) {}
+  }
+  try {
+    evt.reply('terminal-output', { batPath: fullPath, data: text });
+  } catch (_) { /* renderer pode ter fechado */ }
 }
 
 async function runScript(evt, fullPath) {
