@@ -1,4 +1,4 @@
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, clipboard } = require('electron');
 const { Terminal }  = require('xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 
@@ -223,6 +223,17 @@ function addTab(batPath) {
   const term = new Terminal({ convertEol:true });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
+  // Ctrl+C: copiar texto selecionado para a área de transferência
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
+      const sel = term.getSelection();
+      if (sel) {
+        clipboard.writeText(sel);
+        return true; // evento tratado
+      }
+    }
+    return false;
+  });
   term.open(wrapper);
   const termContainer = document.getElementById('terminal-container');
   termContainer.appendChild(wrapper);
