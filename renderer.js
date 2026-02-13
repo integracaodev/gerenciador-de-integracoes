@@ -21,6 +21,18 @@ document.getElementById('tab-right').onclick = () => moveTabs(+1);
 async function loadProjects() {
   const projects = await ipcRenderer.invoke('list-bats');
   const cont     = document.getElementById('projects');
+
+  // Preservar quais projetos estavam expandidos (evita fechar menu lateral em execução automática)
+  const expandedProjects = new Set();
+  cont.querySelectorAll('.project').forEach(projectEl => {
+    const list = projectEl.querySelector('.project-bats');
+    const headerSpan = projectEl.querySelector('.project-header span');
+    if (list?.classList.contains('show') && headerSpan) {
+      const name = headerSpan.textContent.replace(/^🗀\s*/, '').trim();
+      expandedProjects.add(name);
+    }
+  });
+
   cont.innerHTML = '';
 
   Object.entries(projects).forEach(([projName, bats]) => {
@@ -123,6 +135,9 @@ async function loadProjects() {
     // toggle the list when clicking the header
     header.onclick = () => list.classList.toggle('show');
 
+    // Restaurar estado expandido preservado antes do reload
+    if (expandedProjects.has(projName)) list.classList.add('show');
+
     cont.appendChild(projectEl);
   });
   
@@ -152,7 +167,19 @@ function removeTabUI(batPath) {
 }
 
 function addTab(batPath) {
-  if (terminals[batPath]) { focusTab(batPath); return; }
+  if (terminals[batPath]) {
+    // Tab já existe (ex: reinício automático) - atualizar estado sem roubar foco do usuário
+    const t = terminals[batPath];
+    t.isFinished = false;
+    t.exitCode = null;
+    if (t.statusIndicator) {
+      t.statusIndicator.classList.remove('tab-status-success', 'tab-status-error');
+      t.statusIndicator.classList.add('tab-status-running');
+      t.statusIndicator.title = 'Executando';
+    }
+    if (t.tab) t.tab.classList.remove('finished');
+    return;
+  }
 
   const pathSegments = batPath.split(/[\\/]/);
   const name = pathSegments.length >= 2 ? pathSegments.slice(-2)[1] : path.basename(batPath);
