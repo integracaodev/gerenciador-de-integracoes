@@ -69,7 +69,13 @@ async function loadProjects() {
       link.textContent = b.name;
       link.style.flex = '1';
       link.setAttribute('data-bat-path', b.path); // CRITICAL: Set data attribute for global status tracking
-      link.onclick = () => ipcRenderer.send('run-bat', b.path);
+      link.onclick = () => {
+        // Se já tem aba aberta (script rodando ou terminou), focar nela imediatamente
+        if (terminals[b.path]) {
+          focusTab(b.path);
+        }
+        ipcRenderer.send('run-bat', b.path);
+      };
 
       // Verificar status do terminal
       const termEntry = terminals[b.path];
