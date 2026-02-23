@@ -153,6 +153,7 @@ function removeTabUI(batPath) {
   const termEntry = terminals[batPath];
   if (!termEntry) return;
 
+  if (termEntry.clearIntervalId) clearInterval(termEntry.clearIntervalId);
   try { termEntry.wrapper?.remove(); } catch {}
   try { termEntry.tab?.remove(); } catch {}
   delete terminals[batPath];
@@ -178,6 +179,17 @@ function addTab(batPath) {
       t.statusIndicator.title = 'Executando';
     }
     if (t.tab) t.tab.classList.remove('finished');
+    // Reiniciar timer de limpeza periódica da saída
+    if (t.clearIntervalId) clearInterval(t.clearIntervalId);
+    const CLEAR_MS = 5 * 60 * 1000;
+    t.clearIntervalId = setInterval(() => {
+      const e = terminals[batPath];
+      if (!e || e.isFinished) return;
+      try {
+        e.term.clear();
+        e.term.write('\r\n[Saída limpa - script ainda em execução às ' + new Date().toLocaleTimeString() + ']\r\n');
+      } catch (_) {}
+    }, CLEAR_MS);
     return;
   }
 
@@ -238,7 +250,17 @@ function addTab(batPath) {
   const termContainer = document.getElementById('terminal-container');
   termContainer.appendChild(wrapper);
 
-  terminals[batPath] = { term, wrapper, tab, isFinished: false, exitCode: null, projectName, statusIndicator, fitAddon };
+  const CLEAR_OUTPUT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos
+  const clearIntervalId = setInterval(() => {
+    const entry = terminals[batPath];
+    if (!entry || entry.isFinished) return;
+    try {
+      entry.term.clear();
+      entry.term.write('\r\n[Saída limpa - script ainda em execução às ' + new Date().toLocaleTimeString() + ']\r\n');
+    } catch (_) {}
+  }, CLEAR_OUTPUT_INTERVAL_MS);
+
+  terminals[batPath] = { term, wrapper, tab, isFinished: false, exitCode: null, projectName, statusIndicator, fitAddon, clearIntervalId };
   focusTab(batPath);
 }
 
@@ -275,6 +297,7 @@ ipcRenderer.on('bat-exited', (_, data) => {
   const t = terminals[p];
   if(!t) return;
   
+  if (t.clearIntervalId) { clearInterval(t.clearIntervalId); t.clearIntervalId = null; }
   // Mark the terminal as finished but keep it visible
   t.isFinished = true;
   t.exitCode = exitCode;

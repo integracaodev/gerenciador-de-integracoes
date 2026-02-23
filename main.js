@@ -232,40 +232,18 @@ async function syncWithDatabase() {
       return;
     }
     
-    let stoppedCount = 0;
     let updatedCount = 0;
     
-    // Verificar cada processo em execução
+    // Scripts só param por comando explícito. Se o processo está rodando localmente, nunca matamos por sync.
+    // Se o banco diz 'stopped' mas temos processo local, apenas corrigimos o banco para refletir a realidade.
     for (const scriptPath in procMap) {
       const dbStatus = dbStatuses.find(s => s.script_path === scriptPath);
-      
-      if (dbStatus) {
-        // Se o banco diz que deve estar parado, mas está rodando localmente
-        if (dbStatus.status === 'stopped' && procMap[scriptPath]) {
-          console.log(`[Sync] Parando script remotamente: ${scriptPath}`);
-          
-          const entry = procMap[scriptPath];
-          const { process: child, logStream } = entry;
-
-          // Marcar como manualmente parado para não disparar auto-restart
-          try { procMap[scriptPath].manuallyStopped = true; } catch {}
-          
-          // Adicionar mensagem no log
-          const msg = `\n[REMOTE STOP] Script parado remotamente via sincronização de banco de dados\n`;
-          try { logStream.write(msg); } catch {}
-
-          console.log(`[Sync] Killing pid=${child?.pid} (agent=${AGENT_ID})`);
-          const result = await killAndWaitForExit(child, { gracefulMs: 800, forceMs: 12000 });
-          if (!result.ok) {
-            console.error(`[Sync] Falha ao parar (pid=${result.pid ?? child?.pid ?? '??'}). Mantendo status como running para não mentir no banco.`);
-            await saveStatusWithRetry(scriptPath, dbStatus.project_name, dbStatus.script_name, 'running', null, null, child?.pid ?? undefined);
-          } else {
-            // Garantir stopped no banco (já deveria estar), mas atualiza timestamps
-            await saveStatusWithRetry(scriptPath, dbStatus.project_name, dbStatus.script_name, 'stopped', null, null, null);
-          }
-          
-          stoppedCount++;
-        }
+      if (dbStatus && dbStatus.status === 'stopped' && procMap[scriptPath]) {
+        const entry = procMap[scriptPath];
+        const child = entry?.process;
+        console.log(`[Sync] Processo rodando localmente mas banco diz stopped; atualizando banco para running (não matamos): ${scriptPath}`);
+        await saveStatusWithRetry(scriptPath, dbStatus.project_name, dbStatus.script_name, 'running', null, null, child?.pid ?? undefined);
+        updatedCount++;
       }
     }
     
@@ -292,7 +270,7 @@ async function syncWithDatabase() {
       }
     }
     
-    console.log(`[Sync] Sincronização concluída - Parados: ${stoppedCount}, Atualizados: ${updatedCount}`);
+    console.log(`[Sync] Sincronização concluída - Atualizados: ${updatedCount}`);
     
   } catch (error) {
     console.error('[Sync] Erro na sincronização:', error.message);
@@ -1311,13 +1289,16 @@ ipcMain.handle('list-bats', async () => { // mantemos o canal por compatibilidad
 /* ===================== Execução e Logs ===================== */
 function writeBoth(evt, fullPath, logStream, chunk) {
   const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-  // Evita ERR_STREAM_WRITE_AFTER_END: stdout/stderr podem emitir dados após exit → logStream já foi end()
-  if (logStream && logStream.writable) {
-    try { logStream.write(text); } catch (_) {}
-  }
+  // Enviar ao terminal primeiro para não bloquear a leitura do pipe (evita script travar e encerrar)
   try {
     evt.reply('terminal-output', { batPath: fullPath, data: text });
   } catch (_) { /* renderer pode ter fechado */ }
+  // Escrever no log em setImmediate para não bloquear o event loop e continuar drenando stdout
+  if (logStream && logStream.writable) {
+    setImmediate(() => {
+      try { if (logStream.writable) logStream.write(text); } catch (_) {}
+    });
+  }
 }
 
 async function runScript(evt, fullPath) {
@@ -1356,27 +1337,28 @@ async function runScript(evt, fullPath) {
   }
 
   let child;
+  // stdin: 'ignore' = filho recebe EOF logo; evita script travar em fgets(STDIN) ou leitura de stdin
+  const spawnOpts = { cwd, windowsHide: false, stdio: ['ignore', 'pipe', 'pipe'] };
   if (isBatFile) {
     logStream.write(`ENGINE: cmd.exe /c (bat file)\n`);
-    child = spawn('cmd.exe', ['/c', fullPath], { cwd, windowsHide: false, shell: true });
+    child = spawn('cmd.exe', ['/c', fullPath], { ...spawnOpts, shell: true });
   } else {
     logStream.write(`ENGINE: ${phpPath} (php)\n`);
-    child = spawn(phpPath, [fullPath], { cwd, windowsHide: false });
+    // Saída sem buffer: linhas aparecem no terminal em tempo real e o pipe não enche (evita travar e processo encerrar)
+    const phpArgs = ['-d', 'output_buffering=Off', '-d', 'implicit_flush=1', fullPath];
+    child = spawn(phpPath, phpArgs, spawnOpts);
   }
 
   procMap[fullPath] = { process: child, logStream, exitCode: null, manuallyStopped: false };
-  
-  // Save to database (retries). If it fails, cancel execution to keep consistency.
+
+  // Salvar no banco. Se falhar, script continua rodando (só paramos com comando explícito).
   const saved = await saveStatusWithRetry(fullPath, projectName, scriptName, 'running', null, logFile, child.pid);
   if (!saved) {
-    const msg = "[ERRO] Não foi possível salvar status 'running' no banco. Execução cancelada para manter consistência.\n";
+    const msg = "[AVISO] Não foi possível salvar status 'running' no banco. Script continua em execução.\n";
     writeBoth(evt, fullPath, logStream, msg);
-    try { child.kill(); } catch {}
-    try { logStream.end(); } catch {}
-    delete procMap[fullPath];
-    return false;
+    console.warn('[runScript] saveStatusWithRetry falhou; mantendo processo rodando:', scriptName);
   }
-  
+
   evt.reply('bat-started', fullPath);
 
   child.stdout.on('data', (buf) => writeBoth(evt, fullPath, logStream, buf));
@@ -1384,11 +1366,10 @@ async function runScript(evt, fullPath) {
 
   child.on('exit', async (code, signal) => {
     const endedAt = new Date().toLocaleString();
+    const wasManuallyStopped = procMap[fullPath]?.manuallyStopped;
+    delete procMap[fullPath]; // limpar logo para permitir iniciar de novo ao clicar em ▶
     logStream.write(`\n==== END ${endedAt} (code=${code} signal=${signal || ''}) ====\n`);
     try { logStream.end(); } catch {}
-    
-    // Check if process was manually stopped
-    const wasManuallyStopped = procMap[fullPath]?.manuallyStopped;
     
     // Save to database - if manually stopped, keep status as 'stopped'
     if (!wasManuallyStopped) {
@@ -1429,7 +1410,6 @@ async function runScript(evt, fullPath) {
     }
     
     evt.reply('bat-exited', { fullPath, exitCode: code });
-    delete procMap[fullPath];
   });
 
   child.on('error', (err) => {
