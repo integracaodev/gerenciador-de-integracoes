@@ -158,6 +158,17 @@ async function loadProjects() {
   filterProjects(currentFilter);
 }
 
+// Coalesce UI refreshes to avoid rebuilding sidebar too often
+let __projectsRefreshQueued = false;
+function scheduleProjectsRefresh() {
+  if (__projectsRefreshQueued) return;
+  __projectsRefreshQueued = true;
+  queueMicrotask(() => {
+    __projectsRefreshQueued = false;
+    loadProjects();
+  });
+}
+
 /* ---------- abas ---------- */
 function removeTabUI(batPath) {
   const termEntry = terminals[batPath];
@@ -174,7 +185,7 @@ function removeTabUI(batPath) {
     if (remaining.length) focusTab(remaining[0]);
   }
 
-  loadProjects();
+  scheduleProjectsRefresh();
 }
 
 function addTab(batPath) {
@@ -242,7 +253,7 @@ function addTab(batPath) {
 
   const wrapper = document.createElement('div');
   wrapper.className = 'terminal-wrapper';
-  const term = new Terminal({ convertEol:true });
+  const term = new Terminal({ convertEol:true, scrollback: 2000 });
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   // Ctrl+C: copiar texto selecionado para a área de transferência
@@ -295,7 +306,7 @@ function focusTab(batPath){
 /* ---------- IPC handlers ---------- */
 ipcRenderer.on('bat-started', (_, p) => {
   addTab(p); 
-  loadProjects();
+  scheduleProjectsRefresh();
   const now = Date.now();
   const runId = `${now}-${Math.random().toString(16).slice(2)}`;
   __dbgRuns[p] = { runId, startedAt: now, endedAt: null, outBytes: 0, outChunks: 0, afterExitLogged: false };
@@ -361,15 +372,14 @@ ipcRenderer.on('bat-exited', (_, data) => {
     t.wrapper.classList.add('active');
   }
   
-  loadProjects();
-  // keep dbg run record briefly for "output after exit" detection
-  setTimeout(() => { delete __dbgRuns[p]; }, 5000);
+  scheduleProjectsRefresh();
+  // keep dbg run record (avoid setTimeout in debug mode)
 });
 
 // Atualizar lista quando comandos remotos são executados
 ipcRenderer.on('refresh-projects', () => {
   console.log('[Renderer] Atualizando lista após comando remoto');
-  loadProjects();
+  scheduleProjectsRefresh();
 });
 
 // Fechar tab/terminal quando um STOP remoto for executado

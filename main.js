@@ -30,6 +30,86 @@ function dbgSend(hypothesisId, location, message, data = {}, runId = 'pre-fix') 
   } catch {}
 }
 
+// Retenção de logs de execução (.log) ao lado dos scripts: mantém últimos N dias
+const SCRIPT_LOG_RETENTION_DAYS = 5;
+let scriptLogsCleanupInterval = null;
+
+function cleanupLogsInDir(logDir, cutoffMs) {
+  let scanned = 0;
+  let deleted = 0;
+  let errors = 0;
+  let entries = [];
+  try { entries = fs.readdirSync(logDir, { withFileTypes: true }); } catch { return { scanned, deleted, errors }; }
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    if (!/\.log$/i.test(ent.name)) continue;
+    scanned++;
+    const p = path.join(logDir, ent.name);
+    try {
+      const st = fs.statSync(p);
+      if (st.mtimeMs < cutoffMs) {
+        fs.unlinkSync(p);
+        deleted++;
+      }
+    } catch {
+      errors++;
+    }
+  }
+  return { scanned, deleted, errors };
+}
+
+function cleanupOldScriptLogs({ retentionDays = SCRIPT_LOG_RETENTION_DAYS } = {}) {
+  const root = resolveScriptsRoot();
+  if (!root) return { ok: false, reason: 'no_root' };
+  const cutoffMs = Date.now() - (Number(retentionDays) || SCRIPT_LOG_RETENTION_DAYS) * 24 * 60 * 60 * 1000;
+
+  let projEntries = [];
+  try { projEntries = fs.readdirSync(root, { withFileTypes: true }); } catch { return { ok: false, reason: 'readdir_failed' }; }
+
+  const logDirs = new Set();
+  for (const ent of projEntries) {
+    if (!ent.isDirectory()) continue;
+    const projDir = path.join(root, ent.name);
+    const publicDir = path.join(projDir, 'public');
+    const batsDir = path.join(projDir, 'bats');
+
+    let found = [];
+    try {
+      if (fs.existsSync(publicDir) && fs.statSync(publicDir).isDirectory()) {
+        found = found.concat(walkPhpFiles(publicDir, [], publicDir));
+      }
+    } catch {}
+    try {
+      if (fs.existsSync(batsDir) && fs.statSync(batsDir).isDirectory()) {
+        found = found.concat(walkPhpFiles(batsDir, [], batsDir));
+      }
+    } catch {}
+
+    for (const f of found) {
+      try {
+        const dir = path.dirname(f.full);
+        logDirs.add(path.join(dir, 'logs'));
+      } catch {}
+    }
+  }
+
+  let totalScanned = 0;
+  let totalDeleted = 0;
+  let totalErrors = 0;
+  for (const d of logDirs) {
+    try {
+      if (!fs.existsSync(d) || !fs.statSync(d).isDirectory()) continue;
+      const r = cleanupLogsInDir(d, cutoffMs);
+      totalScanned += r.scanned;
+      totalDeleted += r.deleted;
+      totalErrors += r.errors;
+    } catch {}
+  }
+
+  console.log(`[Logs] Limpeza concluída (retenção=${retentionDays} dias): removidos=${totalDeleted}, verificados=${totalScanned}, erros=${totalErrors}`);
+  return { ok: true, deleted: totalDeleted, scanned: totalScanned, errors: totalErrors, retentionDays };
+}
+
 function getCurrentServerId() {
   // Priority: env var > config.json > hostname
   try {
@@ -248,11 +328,12 @@ async function syncWithDatabase() {
     }
     
     let updatedCount = 0;
+    const dbByPath = new Map((dbStatuses || []).map(s => [s.script_path, s]));
     
     // Scripts só param por comando explícito. Se o processo está rodando localmente, nunca matamos por sync.
     // Se o banco diz 'stopped' mas temos processo local, apenas corrigimos o banco para refletir a realidade.
     for (const scriptPath in procMap) {
-      const dbStatus = dbStatuses.find(s => s.script_path === scriptPath);
+      const dbStatus = dbByPath.get(scriptPath);
       if (dbStatus && dbStatus.status === 'stopped' && procMap[scriptPath]) {
         const entry = procMap[scriptPath];
         const child = entry?.process;
@@ -1093,6 +1174,15 @@ app.whenReady().then(async () => {
     );
   }
   createWindow();
+
+  // Limpeza automática de logs de execução (mantém últimos 5 dias)
+  try { cleanupOldScriptLogs({ retentionDays: SCRIPT_LOG_RETENTION_DAYS }); } catch {}
+  try {
+    if (scriptLogsCleanupInterval) clearInterval(scriptLogsCleanupInterval);
+    scriptLogsCleanupInterval = setInterval(() => {
+      try { cleanupOldScriptLogs({ retentionDays: SCRIPT_LOG_RETENTION_DAYS }); } catch {}
+    }, 24 * 60 * 60 * 1000);
+  } catch {}
 });
 
 /**
@@ -1240,6 +1330,22 @@ function walkPhpFiles(dir, acc, baseDir) {
   return acc;
 }
 
+async function walkPhpFilesAsync(dir, acc, baseDir) {
+  let entries = [];
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return acc; }
+  for (const ent of entries) {
+    const p = path.join(dir, ent.name);
+    if (ent.isDirectory()) {
+      if (['vendor', '.git', 'node_modules', 'storage', 'cache'].includes(ent.name.toLowerCase())) continue;
+      await walkPhpFilesAsync(p, acc, baseDir);
+    } else if (ent.isFile() && (/\.php$/i.test(ent.name) || /\.bat$/i.test(ent.name))) {
+      const rel = path.relative(baseDir, p);
+      acc.push({ full: p, rel });
+    }
+  }
+  return acc;
+}
+
 /* ===================== Listagem: RAIZ\projeto\public\*.php (recursivo) ===================== */
 const procMap = {}; // { fullPath: { process, logStream, exitCode } }
 
@@ -1252,10 +1358,15 @@ ipcMain.handle('list-bats', async () => { // mantemos o canal por compatibilidad
 
   const map = {};
   let entries = [];
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (e) {
+  try { entries = await fs.promises.readdir(root, { withFileTypes: true }); } catch (e) {
     console.error('[list-bats] readdirSync falhou:', e?.message || e);
     return {};
   }
+
+  // Fetch all statuses once (avoid N+1 queries)
+  let allDbStatuses = [];
+  try { allDbStatuses = await getAllProjectStatuses(); } catch {}
+  const statusByPath = new Map((allDbStatuses || []).map(s => [s.script_path, s]));
 
   // Process entries sequentially to avoid race conditions
   for (const ent of entries) {
@@ -1268,20 +1379,20 @@ ipcMain.handle('list-bats', async () => { // mantemos o canal por compatibilidad
     
     // Look for PHP files in public/ directory
     if (fs.existsSync(publicDir) && fs.statSync(publicDir).isDirectory()) {
-      const phpFiles = walkPhpFiles(publicDir, [], publicDir);
+      const phpFiles = await walkPhpFilesAsync(publicDir, [], publicDir);
       found = found.concat(phpFiles);
     }
     
     // Look for .bat files in bats/ directory (new structure)
     if (fs.existsSync(batsDir) && fs.statSync(batsDir).isDirectory()) {
-      const batFiles = walkPhpFiles(batsDir, [], batsDir); // walkPhpFiles now finds both .php and .bat
+      const batFiles = await walkPhpFilesAsync(batsDir, [], batsDir); // walkPhpFiles now finds both .php and .bat
       found = found.concat(batFiles);
     }
     
     if (!found.length) continue;
 
-    map[ent.name] = await Promise.all(found.map(async ({ full, rel }) => {
-      const dbStatus = await getProjectStatus(full);
+    map[ent.name] = found.map(({ full, rel }) => {
+      const dbStatus = statusByPath.get(full) || null;
       return {
         name: friendlyTitleForPhp(full, rel.replace(/\\/g,'/')),
         path: full,
@@ -1295,7 +1406,7 @@ ipcMain.handle('list-bats', async () => { // mantemos o canal por compatibilidad
           lastLogFile: dbStatus.last_log_file
         } : null
       };
-    }));
+    });
   }
 
   return map;
@@ -1304,9 +1415,27 @@ ipcMain.handle('list-bats', async () => { // mantemos o canal por compatibilidad
 /* ===================== Execução e Logs ===================== */
 function writeBoth(evt, fullPath, logStream, chunk) {
   const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-  // Enviar ao terminal primeiro para não bloquear a leitura do pipe (evita script travar e encerrar)
+  // Enfileirar IPC para reduzir volume e evitar saturar o renderer
   try {
-    evt.reply('terminal-output', { batPath: fullPath, data: text });
+    const entry = procMap[fullPath];
+    if (entry) {
+      entry._ipcBuf = (entry._ipcBuf || '') + text;
+      if (!entry._ipcFlushScheduled) {
+        entry._ipcFlushScheduled = true;
+        setImmediate(() => {
+          try {
+            const e = procMap[fullPath];
+            if (!e) return;
+            e._ipcFlushScheduled = false;
+            const payload = e._ipcBuf || '';
+            e._ipcBuf = '';
+            if (payload) evt.reply('terminal-output', { batPath: fullPath, data: payload });
+          } catch (_) {}
+        });
+      }
+    } else {
+      evt.reply('terminal-output', { batPath: fullPath, data: text });
+    }
   } catch (_) { /* renderer pode ter fechado */ }
   // Escrever no log em setImmediate para não bloquear o event loop e continuar drenando stdout
   if (logStream && logStream.writable) {
@@ -1318,6 +1447,13 @@ function writeBoth(evt, fullPath, logStream, chunk) {
 
 async function runScript(evt, fullPath) {
   if (procMap[fullPath]) {
+    // Evidência no log atual: tentativa de iniciar enquanto ainda há procMap (pode impedir re-start)
+    try {
+      const entry = procMap[fullPath];
+      const pid = entry?.process?.pid ?? null;
+      const exited = (entry?.process?.exitCode !== null || entry?.process?.signalCode !== null);
+      entry?.logStream?.write?.(`\n[DBG] runScript chamado mas procMap já existe (pid=${pid} exited=${exited})\n`);
+    } catch {}
     evt.reply('focus-tab', fullPath);
     return true;
   }
@@ -1397,6 +1533,8 @@ async function runScript(evt, fullPath) {
     delete procMap[fullPath]; // limpar logo para permitir iniciar de novo ao clicar em ▶
     exitSeen = { code, signal, at: Date.now() };
     dbgSend('A', 'main.js:child.on(exit)', 'exit event', { script: path.basename(fullPath), pid: child?.pid ?? null, code, signal: signal || null, seenStdout, seenStderr }, runId);
+    // Marker inside the per-run log file for server-side evidence (no secrets)
+    try { logStream.write(`\n[DBG ${runId}] exit code=${code} signal=${signal || ''} seenStdoutBytes=${seenStdout} seenStderrBytes=${seenStderr}\n`); } catch {}
     logStream.write(`\n==== END ${endedAt} (code=${code} signal=${signal || ''}) ====\n`);
     try { logStream.end(); } catch {}
     
@@ -1450,6 +1588,10 @@ async function runScript(evt, fullPath) {
   child.on('error', (err) => {
     const msg = `[ERRO spawn] ${err?.message || err}\n`;
     writeBoth(evt, fullPath, logStream, msg);
+    // Evidência no log: erro no processo filho (ex.: falha ao spawn / recursos)
+    try {
+      logStream?.write?.(`[DBG ${runId}] child error pid=${child?.pid ?? null} msg=${String(err?.message || err)}\n`);
+    } catch {}
     dbgSend('E', 'main.js:child.on(error)', 'child error', { script: path.basename(fullPath), pid: child?.pid ?? null, err: String(err?.message || err) }, runId);
   });
 
