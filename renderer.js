@@ -6,6 +6,16 @@ const terminals = {};
 let activeTab   = null;
 let tabOffset   = 0;
 
+// Debug run tracking (no secrets)
+const __dbgRuns = {}; // { [batPath]: { runId, startedAt, endedAt, outBytes, outChunks, afterExitLogged } }
+
+// Receive debug events from main and forward to debug ingest.
+ipcRenderer.on('agent-debug-log', (_evt, payload) => {
+  // #region agent log
+  fetch('http://127.0.0.1:7323/ingest/1f0c69e2-0346-404d-8293-c49438d755ed',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'38d153'},body:JSON.stringify(payload)}).catch(()=>{});
+  // #endregion
+});
+
 /* ---------- barra de abas scrollável ---------- */
 function moveTabs(dir) {
   const wrapper = document.getElementById('tabs-wrapper');
@@ -286,9 +296,28 @@ function focusTab(batPath){
 ipcRenderer.on('bat-started', (_, p) => {
   addTab(p); 
   loadProjects();
+  const now = Date.now();
+  const runId = `${now}-${Math.random().toString(16).slice(2)}`;
+  __dbgRuns[p] = { runId, startedAt: now, endedAt: null, outBytes: 0, outChunks: 0, afterExitLogged: false };
+  // #region agent log
+  fetch('http://127.0.0.1:7323/ingest/1f0c69e2-0346-404d-8293-c49438d755ed',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'38d153'},body:JSON.stringify({sessionId:'38d153',runId,hypothesisId:'C',location:'renderer.js:bat-started',message:'bat-started received',data:{script:String(p).split(/[\\/]/).slice(-1)[0]||'?',hasTerminal:!!terminals[p]},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
 });
 ipcRenderer.on('focus-tab',   (_, p)      => focusTab(p));
 ipcRenderer.on('terminal-output', (_, {batPath,data}) => {
+  const r = __dbgRuns[batPath];
+  if (r) {
+    const txt = (typeof data === 'string') ? data : String(data ?? '');
+    r.outChunks += 1;
+    r.outBytes += txt.length;
+    // If output arrives after bat-exited, log once
+    if (r.endedAt && !r.afterExitLogged) {
+      r.afterExitLogged = true;
+      // #region agent log
+      fetch('http://127.0.0.1:7323/ingest/1f0c69e2-0346-404d-8293-c49438d755ed',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'38d153'},body:JSON.stringify({sessionId:'38d153',runId:r.runId,hypothesisId:'A',location:'renderer.js:terminal-output',message:'terminal-output after bat-exited',data:{script:String(batPath).split(/[\\/]/).slice(-1)[0]||'?',chunkChars:txt.length},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+    }
+  }
   terminals[batPath]?.term.write(data.replace(/\n/g,'\r\n'));
 });
 ipcRenderer.on('bat-exited', (_, data) => {
@@ -296,6 +325,16 @@ ipcRenderer.on('bat-exited', (_, data) => {
   const exitCode = typeof data === 'object' ? data.exitCode : null;
   const t = terminals[p];
   if(!t) return;
+
+  const now = Date.now();
+  const r = __dbgRuns[p];
+  if (r) {
+    r.endedAt = now;
+    const durationMs = (r.startedAt ? (now - r.startedAt) : null);
+    // #region agent log
+    fetch('http://127.0.0.1:7323/ingest/1f0c69e2-0346-404d-8293-c49438d755ed',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'38d153'},body:JSON.stringify({sessionId:'38d153',runId:r.runId,hypothesisId:'B',location:'renderer.js:bat-exited',message:'bat-exited summary',data:{script:String(p).split(/[\\/]/).slice(-1)[0]||'?',exitCode,hadOutput:r.outChunks>0,outChunks:r.outChunks,outChars:r.outBytes,durationMs},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+  }
   
   if (t.clearIntervalId) { clearInterval(t.clearIntervalId); t.clearIntervalId = null; }
   // Mark the terminal as finished but keep it visible
@@ -323,6 +362,8 @@ ipcRenderer.on('bat-exited', (_, data) => {
   }
   
   loadProjects();
+  // keep dbg run record briefly for "output after exit" detection
+  setTimeout(() => { delete __dbgRuns[p]; }, 5000);
 });
 
 // Atualizar lista quando comandos remotos são executados

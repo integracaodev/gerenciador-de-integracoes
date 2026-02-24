@@ -15,6 +15,21 @@ const scheduleTimers = {}; // { scriptPath: timeoutId }
 const AGENT_HOST = os.hostname();
 const AGENT_ID = `${AGENT_HOST}-${process.pid}`;
 
+function dbgSend(hypothesisId, location, message, data = {}, runId = 'pre-fix') {
+  try {
+    if (!mainWindow?.webContents) return;
+    mainWindow.webContents.send('agent-debug-log', {
+      sessionId: '38d153',
+      runId,
+      hypothesisId,
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+    });
+  } catch {}
+}
+
 function getCurrentServerId() {
   // Priority: env var > config.json > hostname
   try {
@@ -1350,6 +1365,12 @@ async function runScript(evt, fullPath) {
   }
 
   procMap[fullPath] = { process: child, logStream, exitCode: null, manuallyStopped: false };
+  const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  dbgSend('D', 'main.js:runScript', 'spawned child', { script: path.basename(fullPath), pid: child?.pid ?? null, isBatFile }, runId);
+  let seenStdout = 0;
+  let seenStderr = 0;
+  let exitSeen = null;
+  let closeSeen = null;
 
   // Salvar no banco. Se falhar, script continua rodando (só paramos com comando explícito).
   const saved = await saveStatusWithRetry(fullPath, projectName, scriptName, 'running', null, logFile, child.pid);
@@ -1361,13 +1382,21 @@ async function runScript(evt, fullPath) {
 
   evt.reply('bat-started', fullPath);
 
-  child.stdout.on('data', (buf) => writeBoth(evt, fullPath, logStream, buf));
-  child.stderr.on('data', (buf) => writeBoth(evt, fullPath, logStream, buf));
+  child.stdout.on('data', (buf) => {
+    seenStdout += (buf?.length ?? 0);
+    writeBoth(evt, fullPath, logStream, buf);
+  });
+  child.stderr.on('data', (buf) => {
+    seenStderr += (buf?.length ?? 0);
+    writeBoth(evt, fullPath, logStream, buf);
+  });
 
   child.on('exit', async (code, signal) => {
     const endedAt = new Date().toLocaleString();
     const wasManuallyStopped = procMap[fullPath]?.manuallyStopped;
     delete procMap[fullPath]; // limpar logo para permitir iniciar de novo ao clicar em ▶
+    exitSeen = { code, signal, at: Date.now() };
+    dbgSend('A', 'main.js:child.on(exit)', 'exit event', { script: path.basename(fullPath), pid: child?.pid ?? null, code, signal: signal || null, seenStdout, seenStderr }, runId);
     logStream.write(`\n==== END ${endedAt} (code=${code} signal=${signal || ''}) ====\n`);
     try { logStream.end(); } catch {}
     
@@ -1412,9 +1441,15 @@ async function runScript(evt, fullPath) {
     evt.reply('bat-exited', { fullPath, exitCode: code });
   });
 
+  child.on('close', (code, signal) => {
+    closeSeen = { code, signal, at: Date.now() };
+    dbgSend('B', 'main.js:child.on(close)', 'close event', { script: path.basename(fullPath), pid: child?.pid ?? null, code, signal: signal || null, seenStdout, seenStderr, hadExit: !!exitSeen, exitCode: exitSeen?.code ?? null }, runId);
+  });
+
   child.on('error', (err) => {
     const msg = `[ERRO spawn] ${err?.message || err}\n`;
     writeBoth(evt, fullPath, logStream, msg);
+    dbgSend('E', 'main.js:child.on(error)', 'child error', { script: path.basename(fullPath), pid: child?.pid ?? null, err: String(err?.message || err) }, runId);
   });
 
   return true;
