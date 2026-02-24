@@ -1373,39 +1373,40 @@ async function runScript(evt, fullPath) {
     
     // Save to database - if manually stopped, keep status as 'stopped'
     if (!wasManuallyStopped) {
+      const DEFAULT_INTERVAL_SECONDS = 30;
+      const scheduleNextRun = async (intervalSeconds) => {
+        const safeSeconds = Math.max(1, Number(intervalSeconds) || DEFAULT_INTERVAL_SECONDS);
+        const intervalMs = safeSeconds * 1000;
+        console.log(`[Schedule] Agendando próxima execução de ${scriptName} em ${safeSeconds}s`);
+
+        if (scheduleTimers[fullPath]) {
+          clearTimeout(scheduleTimers[fullPath]);
+        }
+
+        // Durante o intervalo (sem processo), limpamos PID para evitar PID reciclado matar processo errado
+        await saveStatusWithRetry(fullPath, projectName, scriptName, 'running', code, logFile, null);
+
+        scheduleTimers[fullPath] = setTimeout(() => {
+          console.log(`[Schedule] Executando script agendado: ${scriptName}`);
+          runScript(evt, fullPath);
+          delete scheduleTimers[fullPath];
+        }, intervalMs);
+      };
+
       // Check if script has auto-restart enabled (schedule)
       try {
         const schedule = await getScriptSchedule(fullPath);
         if (schedule && schedule.enabled) {
-          const intervalMs = schedule.interval_seconds * 1000;
-          console.log(`[Schedule] Agendando próxima execução de ${scriptName} em ${schedule.interval_seconds}s`);
-          
-          // Clear existing timer if any
-          if (scheduleTimers[fullPath]) {
-            clearTimeout(scheduleTimers[fullPath]);
-          }
-          
-          // Keep status as 'running' for scheduled scripts (even during interval)
-          // Only update exit_code to track if last execution had errors
-          // Durante o intervalo (sem processo), limpamos PID para evitar PID reciclado matar processo errado
-          await saveStatusWithRetry(fullPath, projectName, scriptName, 'running', code, logFile, null);
-          
-          // Schedule next execution
-          scheduleTimers[fullPath] = setTimeout(() => {
-            console.log(`[Schedule] Executando script agendado: ${scriptName}`);
-            runScript(evt, fullPath);
-            delete scheduleTimers[fullPath];
-          }, intervalMs);
+          await scheduleNextRun(schedule.interval_seconds);
         } else {
-          // No schedule - save final status (finished or error)
-          const status = (code === 0) ? 'finished' : 'error';
-          await saveStatusWithRetry(fullPath, projectName, scriptName, status, code, logFile, undefined);
+          // Fallback resiliente: se não há linha de schedule, continua rodando no intervalo padrão
+          console.warn(`[Schedule] Configuração ausente/desabilitada para ${scriptName}; usando fallback de ${DEFAULT_INTERVAL_SECONDS}s.`);
+          await scheduleNextRun(DEFAULT_INTERVAL_SECONDS);
         }
       } catch (error) {
-        console.error('[Schedule] Erro ao verificar schedule:', error.message);
-        // If error checking schedule, save status anyway
-        const status = (code === 0) ? 'finished' : 'error';
-        await saveStatusWithRetry(fullPath, projectName, scriptName, status, code, logFile, undefined);
+        // Em caso de dúvida/falha de banco, mantém o script vivo (fallback)
+        console.error('[Schedule] Erro ao verificar schedule, aplicando fallback:', error.message);
+        await scheduleNextRun(DEFAULT_INTERVAL_SECONDS);
       }
     }
     
