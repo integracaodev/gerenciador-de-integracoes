@@ -6,6 +6,11 @@ const terminals = {};
 let activeTab   = null;
 let tabOffset   = 0;
 
+// "Erro por output": marca como erro apenas em falhas "hard" (ignora warnings/deprecated).
+const OUTPUT_ERROR_SEVERE_RE = /(falha|access[_\s]?refused|exception|fatal error|sqlstate|authentication failed|uncaught)/i;
+const OUTPUT_PHP_BENIGN_RE = /\bPHP\s+(Deprecated|Warning|Notice|Strict Standards)\b/i;
+const OUTPUT_PHP_BENIGN_OVERRIDE_RE = /(fatal error|sqlstate|access[_\s]?refused|authentication failed|uncaught)/i;
+
 // Debug run tracking (no secrets)
 const __dbgRuns = {}; // { [batPath]: { runId, startedAt, endedAt, outBytes, outChunks, afterExitLogged } }
 
@@ -86,13 +91,17 @@ async function loadProjects() {
       if (termEntry) {
         if (termEntry.isFinished) {
           // Script terminou
-          if (termEntry.exitCode === 0) {
+          if (termEntry.exitCode === 0 && !termEntry.hasErrorOutput) {
             link.classList.add('success'); // Verde - sucesso
           } else {
             link.classList.add('error'); // Vermelho - erro
           }
         } else {
-          link.classList.add('running'); // Verde - rodando
+          if (termEntry.hasErrorOutput) {
+            link.classList.add('error'); // Vermelho - erro (mesmo rodando)
+          } else {
+            link.classList.add('running'); // Verde - rodando
+          }
         }
       } else {
         link.classList.add('idle'); // Cinza - parado
@@ -112,7 +121,9 @@ async function loadProjects() {
       // pois em multi-servidor/auto-restart o procMap local pode não refletir o estado desejado.
       // - dbStatus.status === 'running' => ⏹
       // - caso contrário => ▶
-      const isRunning = (b?.dbStatus?.status ? b.dbStatus.status === 'running' : !!b.running);
+      const isRunning = (b?.dbStatus?.status
+        ? (b.dbStatus.status === 'running' || (b.dbStatus.status === 'error' && !!b.dbStatus.pid))
+        : !!b.running);
       const startStopBtn = document.createElement('button');
       startStopBtn.className = 'stop-btn';
       startStopBtn.innerHTML = isRunning ? '⏹' : '▶';
@@ -194,6 +205,7 @@ function addTab(batPath) {
     const t = terminals[batPath];
     t.isFinished = false;
     t.exitCode = null;
+    t.hasErrorOutput = false;
     if (t.statusIndicator) {
       t.statusIndicator.classList.remove('tab-status-success', 'tab-status-error');
       t.statusIndicator.classList.add('tab-status-running');
@@ -281,7 +293,7 @@ function addTab(batPath) {
     } catch (_) {}
   }, CLEAR_OUTPUT_INTERVAL_MS);
 
-  terminals[batPath] = { term, wrapper, tab, isFinished: false, exitCode: null, projectName, statusIndicator, fitAddon, clearIntervalId };
+  terminals[batPath] = { term, wrapper, tab, isFinished: false, exitCode: null, hasErrorOutput: false, projectName, statusIndicator, fitAddon, clearIntervalId };
   focusTab(batPath);
 }
 
@@ -329,6 +341,26 @@ ipcRenderer.on('terminal-output', (_, {batPath,data}) => {
       // #endregion
     }
   }
+  const t = terminals[batPath];
+  if (t && !t.hasErrorOutput) {
+    try {
+      const s = (typeof data === 'string') ? data : String(data ?? '');
+      const isSevere = s && OUTPUT_ERROR_SEVERE_RE.test(s);
+      const isBenignPhp = s && OUTPUT_PHP_BENIGN_RE.test(s);
+      const benignOverride = s && OUTPUT_PHP_BENIGN_OVERRIDE_RE.test(s);
+      if (isSevere && (!isBenignPhp || benignOverride)) {
+        t.hasErrorOutput = true;
+        // Atualizar indicador da tab para "erro" mesmo rodando
+        if (t.statusIndicator) {
+          t.statusIndicator.classList.remove('tab-status-running', 'tab-status-success');
+          t.statusIndicator.classList.add('tab-status-error');
+          t.statusIndicator.title = 'Erro detectado na saída';
+        }
+        if (t.tab) t.tab.classList.add('finished'); // reaproveita estilo visual existente
+        scheduleProjectsRefresh();
+      }
+    } catch (_) {}
+  }
   terminals[batPath]?.term.write(data.replace(/\n/g,'\r\n'));
 });
 ipcRenderer.on('bat-exited', (_, data) => {
@@ -351,16 +383,17 @@ ipcRenderer.on('bat-exited', (_, data) => {
   // Mark the terminal as finished but keep it visible
   t.isFinished = true;
   t.exitCode = exitCode;
+  const outputHadError = !!t.hasErrorOutput;
   
   // Update status indicator based on exit code
   if (t.statusIndicator) {
     t.statusIndicator.classList.remove('tab-status-running');
-    if (exitCode === 0) {
+    if (exitCode === 0 && !outputHadError) {
       t.statusIndicator.classList.add('tab-status-success');
       t.statusIndicator.title = 'Concluído com sucesso';
     } else {
       t.statusIndicator.classList.add('tab-status-error');
-      t.statusIndicator.title = `Erro (código: ${exitCode})`;
+      t.statusIndicator.title = outputHadError ? 'Erro detectado na saída' : `Erro (código: ${exitCode})`;
     }
   }
   
@@ -411,13 +444,17 @@ function updateGlobalStatus() {
       
       if (termEntry) {
         if (termEntry.isFinished) {
-          if (termEntry.exitCode === 0) {
+          if (termEntry.exitCode === 0 && !termEntry.hasErrorOutput) {
             successCount++;
           } else {
             errorCount++;
           }
         } else {
-          successCount++; // Running counts as success
+          if (termEntry.hasErrorOutput) {
+            errorCount++;
+          } else {
+            successCount++; // Running counts as success
+          }
         }
       } else {
         idleCount++;
@@ -467,9 +504,9 @@ function filterProjects(status) {
         
         if (termEntry) {
           if (termEntry.isFinished) {
-            batStatus = termEntry.exitCode === 0 ? 'success' : 'error';
+            batStatus = (termEntry.exitCode === 0 && !termEntry.hasErrorOutput) ? 'success' : 'error';
           } else {
-            batStatus = 'success'; // Running
+            batStatus = termEntry.hasErrorOutput ? 'error' : 'success'; // Running
           }
         }
         

@@ -5,7 +5,7 @@ const path  = require('path');
 const fs    = require('fs');
 const treeKill = require('tree-kill');
 const os = require('os');
-const { initDatabase, saveProjectStatus, getProjectStatus, getAllProjectStatuses, closeDatabase, testConnection, getPendingRemoteCommands, markRemoteCommandAsExecuted, markRemoteCommandAsFailed, cleanOldRemoteCommands, getScriptSchedule, saveScriptSchedule, deleteScriptSchedule } = require('./database');
+const { initDatabase, saveProjectStatus, getProjectStatus, getAllProjectStatuses, markProjectErrorFromOutput, closeDatabase, testConnection, getPendingRemoteCommands, markRemoteCommandAsExecuted, markRemoteCommandAsFailed, cleanOldRemoteCommands, getScriptSchedule, saveScriptSchedule, deleteScriptSchedule } = require('./database');
 const { loadMySQLConfig, saveMySQLConfig } = require('./db-config');
 
 let mainWindow;
@@ -1401,6 +1401,7 @@ ipcMain.handle('list-bats', async () => { // mantemos o canal por compatibilidad
         dbStatus: dbStatus ? {
           status: dbStatus.status,
           exitCode: dbStatus.exit_code,
+          pid: dbStatus.pid,
           startedAt: dbStatus.started_at,
           finishedAt: dbStatus.finished_at,
           lastLogFile: dbStatus.last_log_file
@@ -1505,6 +1506,13 @@ async function runScript(evt, fullPath) {
   dbgSend('D', 'main.js:runScript', 'spawned child', { script: path.basename(fullPath), pid: child?.pid ?? null, isBatFile }, runId);
   let seenStdout = 0;
   let seenStderr = 0;
+  // Detecta "erro" por padrão de saída (sem capturar o texto em si). Ignora warnings/deprecated.
+  const errRe = /(falha|access[_\s]?refused|exception|fatal error|sqlstate|authentication failed|uncaught)/i;
+  const phpBenignRe = /\bPHP\s+(Deprecated|Warning|Notice|Strict Standards)\b/i;
+  const phpBenignOverrideRe = /(fatal error|sqlstate|access[_\s]?refused|authentication failed|uncaught)/i;
+  let errMatchStdout = 0;
+  let errMatchStderr = 0;
+  let outputErrorMarked = false;
   let exitSeen = null;
   let closeSeen = null;
 
@@ -1520,10 +1528,36 @@ async function runScript(evt, fullPath) {
 
   child.stdout.on('data', (buf) => {
     seenStdout += (buf?.length ?? 0);
+    try {
+      const s = buf?.toString?.('utf8') || '';
+      const isSevere = s && errRe.test(s);
+      const isBenignPhp = s && phpBenignRe.test(s);
+      const benignOverride = s && phpBenignOverrideRe.test(s);
+      if (isSevere && (!isBenignPhp || benignOverride)) {
+        errMatchStdout++;
+        if (!outputErrorMarked) {
+          outputErrorMarked = true;
+          try { markProjectErrorFromOutput(fullPath, 1); } catch {}
+        }
+      }
+    } catch {}
     writeBoth(evt, fullPath, logStream, buf);
   });
   child.stderr.on('data', (buf) => {
     seenStderr += (buf?.length ?? 0);
+    try {
+      const s = buf?.toString?.('utf8') || '';
+      const isSevere = s && errRe.test(s);
+      const isBenignPhp = s && phpBenignRe.test(s);
+      const benignOverride = s && phpBenignOverrideRe.test(s);
+      if (isSevere && (!isBenignPhp || benignOverride)) {
+        errMatchStderr++;
+        if (!outputErrorMarked) {
+          outputErrorMarked = true;
+          try { markProjectErrorFromOutput(fullPath, 1); } catch {}
+        }
+      }
+    } catch {}
     writeBoth(evt, fullPath, logStream, buf);
   });
 
@@ -1532,16 +1566,16 @@ async function runScript(evt, fullPath) {
     const wasManuallyStopped = procMap[fullPath]?.manuallyStopped;
     delete procMap[fullPath]; // limpar logo para permitir iniciar de novo ao clicar em ▶
     exitSeen = { code, signal, at: Date.now() };
-    dbgSend('A', 'main.js:child.on(exit)', 'exit event', { script: path.basename(fullPath), pid: child?.pid ?? null, code, signal: signal || null, seenStdout, seenStderr }, runId);
+    dbgSend('A', 'main.js:child.on(exit)', 'exit event', { script: path.basename(fullPath), pid: child?.pid ?? null, code, signal: signal || null, seenStdout, seenStderr, errMatchStdout, errMatchStderr }, runId);
     // Marker inside the per-run log file for server-side evidence (no secrets)
-    try { logStream.write(`\n[DBG ${runId}] exit code=${code} signal=${signal || ''} seenStdoutBytes=${seenStdout} seenStderrBytes=${seenStderr}\n`); } catch {}
+    try { logStream.write(`\n[DBG ${runId}] exit code=${code} signal=${signal || ''} seenStdoutBytes=${seenStdout} seenStderrBytes=${seenStderr} errMatchStdout=${errMatchStdout} errMatchStderr=${errMatchStderr}\n`); } catch {}
     logStream.write(`\n==== END ${endedAt} (code=${code} signal=${signal || ''}) ====\n`);
     try { logStream.end(); } catch {}
     
     // Save to database - if manually stopped, keep status as 'stopped'
     if (!wasManuallyStopped) {
       const DEFAULT_INTERVAL_SECONDS = 30;
-      const scheduleNextRun = async (intervalSeconds) => {
+      const scheduleNextRun = async (intervalSeconds, { statusForInterval, exitCodeForInterval } = {}) => {
         const safeSeconds = Math.max(1, Number(intervalSeconds) || DEFAULT_INTERVAL_SECONDS);
         const intervalMs = safeSeconds * 1000;
         console.log(`[Schedule] Agendando próxima execução de ${scriptName} em ${safeSeconds}s`);
@@ -1550,8 +1584,10 @@ async function runScript(evt, fullPath) {
           clearTimeout(scheduleTimers[fullPath]);
         }
 
-        // Durante o intervalo (sem processo), limpamos PID para evitar PID reciclado matar processo errado
-        await saveStatusWithRetry(fullPath, projectName, scriptName, 'running', code, logFile, null);
+        // Durante o intervalo (sem processo), reflita o último resultado (running vs error) sem perder erro por output
+        const st = statusForInterval || 'running';
+        const ec = (exitCodeForInterval === undefined) ? code : exitCodeForInterval;
+        await saveStatusWithRetry(fullPath, projectName, scriptName, st, ec, logFile, null);
 
         scheduleTimers[fullPath] = setTimeout(() => {
           console.log(`[Schedule] Executando script agendado: ${scriptName}`);
@@ -1563,17 +1599,23 @@ async function runScript(evt, fullPath) {
       // Check if script has auto-restart enabled (schedule)
       try {
         const schedule = await getScriptSchedule(fullPath);
+        const outputHadError = (errMatchStdout + errMatchStderr) > 0;
+        const effectiveExitCode = (code === 0 && outputHadError) ? 1 : code;
+        const intervalStatus = (effectiveExitCode === 0) ? 'running' : 'error';
         if (schedule && schedule.enabled) {
-          await scheduleNextRun(schedule.interval_seconds);
+          await scheduleNextRun(schedule.interval_seconds, { statusForInterval: intervalStatus, exitCodeForInterval: effectiveExitCode });
         } else {
           // Fallback resiliente: se não há linha de schedule, continua rodando no intervalo padrão
           console.warn(`[Schedule] Configuração ausente/desabilitada para ${scriptName}; usando fallback de ${DEFAULT_INTERVAL_SECONDS}s.`);
-          await scheduleNextRun(DEFAULT_INTERVAL_SECONDS);
+          // Sem schedule, salvar status final (finished/error) baseado em exit code ou erro por output
+          const status = (effectiveExitCode === 0) ? 'finished' : 'error';
+          await saveStatusWithRetry(fullPath, projectName, scriptName, status, effectiveExitCode, logFile, undefined);
+          await scheduleNextRun(DEFAULT_INTERVAL_SECONDS, { statusForInterval: intervalStatus, exitCodeForInterval: effectiveExitCode });
         }
       } catch (error) {
         // Em caso de dúvida/falha de banco, mantém o script vivo (fallback)
         console.error('[Schedule] Erro ao verificar schedule, aplicando fallback:', error.message);
-        await scheduleNextRun(DEFAULT_INTERVAL_SECONDS);
+        await scheduleNextRun(DEFAULT_INTERVAL_SECONDS, { statusForInterval: 'running', exitCodeForInterval: code });
       }
     }
     

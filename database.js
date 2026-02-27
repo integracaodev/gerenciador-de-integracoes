@@ -272,6 +272,27 @@ async function getAllProjectStatuses() {
 }
 
 /**
+ * Marca um script como "error" por erro detectado no output,
+ * sem encerrar o processo (não altera pid/started_at).
+ */
+async function markProjectErrorFromOutput(scriptPath, exitCode = 1) {
+  if (!pool) {
+    console.error('[MySQL] Pool não inicializado');
+    return false;
+  }
+  try {
+    await pool.query(
+      "UPDATE project_status SET status = 'error', exit_code = ?, updated_at = NOW() WHERE script_path = ?",
+      [exitCode, scriptPath]
+    );
+    return true;
+  } catch (error) {
+    console.error('[MySQL] Erro ao marcar error por output:', error.message);
+    return false;
+  }
+}
+
+/**
  * Fecha o pool de conexões
  */
 async function closeDatabase() {
@@ -479,6 +500,7 @@ module.exports = {
   saveProjectStatus,
   getProjectStatus,
   getAllProjectStatuses,
+  markProjectErrorFromOutput,
   closeDatabase,
   testConnection,
   getPendingRemoteCommands,
