@@ -29,21 +29,33 @@ jobs:
       - name: Build (npm run pack)
         run: npm run pack
 
-      - name: Zip dist folder
+      - name: Build (npm run pack:ws2012)
+        run: npm run pack:ws2012
+
+      - name: Zip dist folders
         shell: pwsh
         run: |
           if (!(Test-Path "dist")) { throw "Pasta dist/ não encontrada." }
+          if (!(Test-Path "dist-ws2012")) { throw "Pasta dist-ws2012/ não encontrada." }
 
-          $tag = "release-${{ github.ref_name }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "manual-${{ github.run_number }}" }
+          # Se disparado por tag, use a própria tag. Se manual, crie uma tag "manual-<run_number>"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+          } else {
+            $tag = "manual-${{ github.run_number }}"
+          }
 
-          $zipName = "RochaSystem-Central-de-Apps-$tag-win32-x64.zip"
+          $zipNameA = "RochaSystem-Central-de-Apps-$tag-win32-x64.zip"
+          $zipNameB = "RochaSystem-Central-de-Apps-$tag-win32-x64-ws2012.zip"
 
-          if (Test-Path $zipName) { Remove-Item $zipName -Force }
-          Compress-Archive -Path "dist\*" -DestinationPath $zipName -Force
+          if (Test-Path $zipNameA) { Remove-Item $zipNameA -Force }
+          if (Test-Path $zipNameB) { Remove-Item $zipNameB -Force }
+          Compress-Archive -Path "dist\*" -DestinationPath $zipNameA -Force
+          Compress-Archive -Path "dist-ws2012\*" -DestinationPath $zipNameB -Force
 
-          "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "TAG_NAME=$tag"     | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZIP_NAME=$zipNameA"        | Out-File -FilePath $env:GITHUB_ENV -Append
+          "ZIP_NAME_WS2012=$zipNameB" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TAG_NAME=$tag"             | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Create/Update GitHub Release and upload asset
         uses: softprops/action-gh-release@v2
@@ -52,4 +64,6 @@ jobs:
           name: ${{ env.TAG_NAME }}
           draft: false
           prerelease: false
-          files: ${{ env.ZIP_NAME }}
+          files: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME_WS2012 }}
